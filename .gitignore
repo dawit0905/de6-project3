@@ -1,0 +1,33 @@
+# Python 가상환경
+venv/
+.env
+
+# PyCharm 등 IDE 관련
+.idea/
+*.iml
+
+# 로그 및 DAG 런타임 생성 파일
+logs/
+*.log
+
+# Airflow DB, PID, config
+airflow.db
+airflow-webserver.pid
+__pycache__/
+
+# Docker 관련
+# Named volume 내용은 Docker가 관리하므로 무시
+postgres-db-volume/
+docker-compose.override.yml
+
+# Python bytecode
+*.pyc
+*.pyo
+*.pyd
+
+# Jupyter notebook checkpoint
+.ipynb_checkpoints/
+
+# Mac OS, Windows 등 시스템 파일
+.DS_Store
+Thumbs.db
