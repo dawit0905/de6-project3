@@ -2,15 +2,15 @@ import io
 import json
 import feedparser
 import pandas as pd
-from airflow.operators.trigger_dagrun import TriggerDagRunOperator
-
-from common import stock_keyword
-
+from io import StringIO
 from datetime import timedelta
 
 from airflow.decorators import dag, task
 from airflow.utils.dates import datetime
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
+
+from common import stock_keyword
 
 
 @dag(
@@ -22,7 +22,6 @@ from airflow.providers.amazon.aws.hooks.s3 import S3Hook
     tags=['stock', 'news'],
 )
 def stock_news_match_pipeline():
-
     @task
     def load_anomalies(s3_key: str, bucket_name: str) -> list[dict]:
         """
@@ -42,9 +41,7 @@ def stock_news_match_pipeline():
 
         # 딕셔너리 리스트로 변환
         result = df.to_dict(orient='records')
-
         return result
-
 
     @task
     def fetch_news(anomaly_item: dict):
@@ -67,34 +64,39 @@ def stock_news_match_pipeline():
         url = f"https://news.google.com/rss/search?q={query}"
         feed = feedparser.parse(url, request_headers=headers)
         return [{
+            'ticker': anomaly_item["ticker"],
+            'date': anomaly_item["date"],
             'title': entry.title,
             'link': entry.link,
             'published': entry.get('published', ''),
             'source': entry.get('source', {}).get('title', ''),
-            'ticker': anomaly_item["ticker"],
-            'anomaly_date': anomaly_item["date"]
         } for entry in feed.entries]
 
     @task
     def collect_news(news: list[list[dict]]) -> str:
-        # s3으로 news를 json 형태로 업로드하고 해당 s3 key를 리턴하는 함수
+        # s3으로 news를 csv 형태로 업로드하고 해당 s3 key를 리턴하는 함수
         flattened = [item for sublist in news for item in sublist]
+        df = pd.DataFrame(flattened)
+        csv_buffer = StringIO()
+        df.to_csv(csv_buffer, index=False)
+        csv_data = csv_buffer.getvalue()
+
         hook = S3Hook('aws_conn_id')
-        s3_key = f"news/{flattened[0]['ticker']}_{flattened[0]['date']}.json"
+        s3_key = f"news/{flattened[0]['ticker']}_{flattened[0]['date']}.csv"
         hook.load_string(
-            string_data=json.dumps(flattened),
+            string_data=csv_data,
             key=s3_key,
             bucket_name='bucket_name',
             replace=True
         )
         return s3_key  # 다음 DAG에서 사용할 키
 
-
     anomalies = load_anomalies('s3_key', 'bucket_name')
     fetched_news = fetch_news.expand(anomaly_item=anomalies)
     news_s3_key = collect_news(fetched_news)
 
     # news 파일이 올라간 s3 key를 다음 DAG로 전달
+    # TODO: 다음 Dag id 입력
     s3_key_trigger = TriggerDagRunOperator(
         task_id="",
         trigger_dag_id="",
