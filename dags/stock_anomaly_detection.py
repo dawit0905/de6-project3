@@ -1,7 +1,9 @@
-from airflow.decorators import dag, task
+from airflow.decorators import dag
 from airflow.operators.empty import EmptyOperator
 from airflow.utils.dates import datetime
 from datetime import timedelta
+from stock_utils import fetch_stock_data, detect_anomaly
+
 
 # 상위 시가총액 + 테마주 + 업종다양화 추천종목
 TICKERS = [
@@ -16,7 +18,10 @@ TICKERS = [
         '086790.KQ', # 하나금융지주 
         '035760.KQ', # CJ ENM
 ]
-   
+
+START_DATE_FIXED = "2024-06-01"
+END_DATE_FIXED = "2024-12-31"
+
 @dag(
     dag_id='stock_anomaly_detection',
     schedule_interval='@daily',
@@ -25,18 +30,9 @@ TICKERS = [
     max_active_runs=1,
     tags=['stock', 'anomaly']
 )
-
 def stock_anomaly_detection():
 
-    @task
-    def fetch_stock(ticker: str, ds: str):
-        # yfinance 등으로 주가 수집
-        return 
-
-    @task
-    def detect_anomaly(stock_data: dict):
-        # 이상치 판단 로직
-        return 
+    from airflow.decorators import task
 
     @task.branch
     def choose_branch(ds: str):
@@ -45,11 +41,18 @@ def stock_anomaly_detection():
     fetch_only = EmptyOperator(task_id="fetch_only")
     run_pipeline = EmptyOperator(task_id="run_pipeline")
 
-    fetched = fetch_stock.expand(ticker=TICKERS)
-    anomalies = detect_anomaly.expand(stock_data=fetched)
+    # 병렬 주가 수집
+    fetched_paths = fetch_stock_data.partial(
+        start_date=START_DATE_FIXED,
+        end_date=END_DATE_FIXED
+    ).expand(ticker=TICKERS)
 
+    # 이상치 탐지
+    anomaly_paths = detect_anomaly.expand(csv_path=fetched_paths)
+
+    # 분기 태스크 → fetch_only or run_pipeline
     branch = choose_branch()
     branch >> [fetch_only, run_pipeline]
-    fetched >> anomalies >> run_pipeline
+    anomaly_paths >> run_pipeline
 
 stock_anomaly_detection()
