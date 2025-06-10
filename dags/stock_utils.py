@@ -5,11 +5,12 @@ import pandas as pd
 import os
 import boto3
 
-
-
 DATA_DIR = "/opt/airflow/dags/files"
-S3_BUCKET = 'de6-stock-anomaly'
+S3_BUCKET = 'de6-project3'
 S3_FOLDER = 'stock-anomaly'
+AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+
 
 @task
 def fetch_stock_data(ticker: str, start_date: str, end_date: str) -> str:
@@ -17,16 +18,15 @@ def fetch_stock_data(ticker: str, start_date: str, end_date: str) -> str:
 
     if df.empty:
         print(f"[{ticker}] 데이터가 비어 있습니다.")
-        return ""
 
     df = df.reset_index()
 
-    
     try:
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.droplevel(1)
     except Exception as e:
         print(f"[{ticker}] 컬럼 처리 중 오류 발생: {e}")
+        raise
 
     os.makedirs(DATA_DIR, exist_ok=True)
     path = f"{DATA_DIR}/{ticker}.csv"
@@ -34,13 +34,13 @@ def fetch_stock_data(ticker: str, start_date: str, end_date: str) -> str:
     print(f"[{ticker}] CSV 저장 완료 → {path}")
     return path
 
+
 @task
 def detect_anomaly(csv_path: str) -> str:
-
     if not csv_path:
         print(f"[입력 누락] csv_path가 비어있습니다 → 생략")
         return ""
-    
+
     if not os.path.exists(csv_path):
         print(f"[{csv_path}] CSV 없음 → 생략")
         return ""
@@ -50,7 +50,7 @@ def detect_anomaly(csv_path: str) -> str:
     except Exception as e:
         print(f"[{csv_path}] CSV 로딩 실패 → {e}")
         return ""
-    
+
     if df.empty:
         print(f"[{csv_path}] 데이터 없음 → 생략")
         return ""
@@ -63,7 +63,7 @@ def detect_anomaly(csv_path: str) -> str:
         df['is_outlier'] = df['z_score'].abs() > 2.5
     except Exception as e:
         print(f"[{csv_path}] 이상치 분석 실패 → {e}")
-        return ""
+        raise
 
     output_path = csv_path.replace(".csv", "_anomaly.csv")
     df.to_csv(output_path)
@@ -75,13 +75,12 @@ def detect_anomaly(csv_path: str) -> str:
 def upload_to_s3(file_path: str) -> str:
     if not file_path or not os.path.exists(file_path):
         print(f"[S3 업로드 생략] 파일 없음: {file_path}")
-        return ""
+        raise
 
     s3 = boto3.client(
         's3',
-        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-        region_name=os.getenv("AWS_REGION")
+        aws_access_key_id=AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
     )
 
     filename = os.path.basename(file_path)
@@ -93,4 +92,4 @@ def upload_to_s3(file_path: str) -> str:
         return f"s3://{S3_BUCKET}/{s3_key}"
     except Exception as e:
         print(f"[S3 업로드 실패] {e}")
-        return ""
+        raise
