@@ -1,16 +1,16 @@
 import io
-import json
+import os
 import feedparser
 import pandas as pd
+import boto3
 from io import StringIO
 from datetime import timedelta
 
 from airflow.decorators import dag, task
 from airflow.utils.dates import datetime
-from airflow.providers.amazon.aws.hooks.s3 import S3Hook
-from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 
 from common import stock_keyword
+from stock_utils import S3_FOLDER, S3_BUCKET
 
 
 @dag(
@@ -22,26 +22,41 @@ from common import stock_keyword
     tags=['stock', 'news'],
 )
 def stock_news_match_pipeline():
+
     @task
-    def load_anomalies(s3_key: str, bucket_name: str) -> list[dict]:
-        """
-        리턴: [{'ticker': '005930.KS', 'stock_name': '삼성', 'date': '2024-05-21'}, ...]
-        """
-        hook = S3Hook('aws_conn_id')
-        s3_csv_obj = hook.get_key(key=s3_key, bucket_name=bucket_name)
+    def load_csv_files(s3_object, bucket_name: str, prefix: str) -> list:
+        """S3 anomaly/ 폴더 내 모든 CSV 파일 경로 수집"""
+        paginator = s3_object.get_paginator('list_objects_v2')
+        csv_files = []
 
+        for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix):
+            for obj in page.get('Contents', []):
+                key = obj['Key']
+                if key.endswith('.csv') and not key.endswith('/'):
+                    csv_files.append(key)
+        return csv_files
+
+    @task
+    def load_anomalies(s3_object, bucket_name: str, csv_key: str) -> dict:
         # 파일 내용을 바이트로 읽어서 pandas로 처리
-        file_content = s3_csv_obj.get()['Body'].read()
-        df = pd.read_csv(io.BytesIO(file_content))
-        df = df[['ticker', 'date']]
-        df['stock_name'] = df['ticker'].map(stock_keyword)
+        response = s3_object.get_object(
+            Bucket=bucket_name,
+            Key=csv_key
+        )
+        df = pd.read_csv(io.BytesIO(response['Body'].read()))
+        ticker = csv_key.split('/')[-1].split('_')[0]
+        anomalies = []
 
-        # 컬럼 순서 재정렬
-        df = df[['ticker', 'stock_name', 'date']]
+        if 'outlier' in df.columns:
+            filtered = df[df['outlier'] == True]
+            for _, row in filtered.iterrows():
+                anomalies.append({
+                    'ticker': ticker,
+                    'stock_name': stock_keyword.get(ticker, 'N/A'),
+                    'date': row['date']
+                })
+        return {'csv_key': csv_key, 'anomalies': anomalies}
 
-        # 딕셔너리 리스트로 변환
-        result = df.to_dict(orient='records')
-        return result
 
     @task
     def fetch_news(anomaly_item: dict):
@@ -65,6 +80,7 @@ def stock_news_match_pipeline():
         feed = feedparser.parse(url, request_headers=headers)
         return [{
             'ticker': anomaly_item["ticker"],
+            'stock_name': anomaly_item["stock_name"] if anomaly_item["stock_name"] != "CJ%20ENM" else "CJ ENM",
             'date': anomaly_item["date"],
             'title': entry.title,
             'link': entry.link,
@@ -73,37 +89,47 @@ def stock_news_match_pipeline():
         } for entry in feed.entries]
 
     @task
-    def collect_news(news: list[list[dict]]) -> str:
+    def upload_news(s3_object, news: list[list[dict]]) -> str:
         # s3으로 news를 csv 형태로 업로드하고 해당 s3 key를 리턴하는 함수
         flattened = [item for sublist in news for item in sublist]
         df = pd.DataFrame(flattened)
         csv_buffer = StringIO()
         df.to_csv(csv_buffer, index=False)
-        csv_data = csv_buffer.getvalue()
 
-        hook = S3Hook('aws_conn_id')
-        s3_key = f"news/{flattened[0]['ticker']}_{flattened[0]['date']}.csv"
-        hook.load_string(
-            string_data=csv_data,
-            key=s3_key,
-            bucket_name='bucket_name',
-            replace=True
-        )
+        s3_key = f"news/{flattened['ticker']}_news.csv"
+        try:
+            s3_object.upload_fileobj(
+                io.BytesIO(csv_buffer.getvalue().encode()),
+                bucket_name,
+                s3_key
+            )
+        except Exception as e:
+            print(str(e), f"{s3_key} data fail!")
+            raise
         return s3_key  # 다음 DAG에서 사용할 키
 
-    anomalies = load_anomalies('s3_key', 'bucket_name')
-    fetched_news = fetch_news.expand(anomaly_item=anomalies)
-    news_s3_key = collect_news(fetched_news)
-
-    # news 파일이 올라간 s3 key를 다음 DAG로 전달
-    # TODO: 다음 Dag id 입력
-    s3_key_trigger = TriggerDagRunOperator(
-        task_id="",
-        trigger_dag_id="",
-        conf={"s3_key": news_s3_key}
+    aws_access_key_id = os.getenv('AWS_ACCESS_KEY_ID')
+    aws_secret_key = os.getenv('AWS_SECRET_ACCESS_KEY')
+    bucket_name = S3_BUCKET
+    prefix = S3_FOLDER
+    s3 = boto3.client(
+        's3',
+        aws_access_key_id=aws_access_key_id,
+        aws_secret_access_key=aws_secret_key,
     )
 
-    load_anomalies >> fetched_news >> news_s3_key >> s3_key_trigger
+    csv_keys = load_csv_files(
+        s3_object=s3,
+        bucket_name=bucket_name, prefix=prefix
+    )
+    anomalies = load_anomalies.partial(
+        s3_object=s3,
+        bucket_name=bucket_name
+    ).expand(csv_key=csv_keys)
+    fetched_news = fetch_news.expand(anomaly_item=anomalies)
+    news_upload_path = upload_news(s3_object=s3, news=fetched_news)
+
+    csv_keys >> anomalies >> fetched_news >> news_upload_path
 
 stock_news_match_pipeline()
 
