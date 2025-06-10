@@ -4,23 +4,23 @@ from airflow.utils.dates import datetime
 from datetime import timedelta
 from stock_utils import fetch_stock_data, detect_anomaly, upload_to_s3
 
-
 # 상위 시가총액 + 테마주 + 업종다양화 추천종목
 TICKERS = [
-        '005930.KS', # 삼성전자 
-        '000660.KS', # SK하이닉스 
-        '373220.KQ', # LG에너지솔루션 
-        '247540.KQ', # 에코프로비엠 
-        '068270.KQ', # 셀트리온 
-        '035720.KQ', # 카카오 
-        '034020.KQ', # 두산에너빌리티 
-        '011200.KS', # HMM 
-        '086790.KQ', # 하나금융지주 
-        '035760.KQ', # CJ ENM
+    '005930.KS',  # 삼성전자
+    '000660.KS',  # SK하이닉스
+    '373220.KQ',  # LG에너지솔루션
+    '247540.KQ',  # 에코프로비엠
+    '068270.KQ',  # 셀트리온
+    '035720.KQ',  # 카카오
+    '034020.KQ',  # 두산에너빌리티
+    '011200.KS',  # HMM
+    '086790.KQ',  # 하나금융지주
+    '035760.KQ',  # CJ ENM
 ]
 
 START_DATE_FIXED = "2024-06-01"
 END_DATE_FIXED = "2024-12-31"
+
 
 @dag(
     dag_id='stock_anomaly_detection',
@@ -31,7 +31,6 @@ END_DATE_FIXED = "2024-12-31"
     tags=['stock', 'anomaly']
 )
 def stock_anomaly_detection():
-
     from airflow.decorators import task
 
     @task.branch
@@ -57,5 +56,6 @@ def stock_anomaly_detection():
     branch = choose_branch()
     branch >> [fetch_only, run_pipeline]
     uploaded_paths >> run_pipeline
+
 
 stock_anomaly_detection()
