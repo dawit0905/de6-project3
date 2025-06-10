@@ -2,7 +2,7 @@ from airflow.decorators import dag
 from airflow.operators.empty import EmptyOperator
 from airflow.utils.dates import datetime
 from datetime import timedelta
-from stock_utils import fetch_stock_data, detect_anomaly
+from stock_utils import fetch_stock_data, detect_anomaly, upload_to_s3
 
 
 # 상위 시가총액 + 테마주 + 업종다양화 추천종목
@@ -26,7 +26,7 @@ END_DATE_FIXED = "2024-12-31"
     dag_id='stock_anomaly_detection',
     schedule_interval='@daily',
     start_date=datetime(2024, 5, 1),
-    catchup=True,
+    catchup=False,
     max_active_runs=1,
     tags=['stock', 'anomaly']
 )
@@ -50,9 +50,12 @@ def stock_anomaly_detection():
     # 이상치 탐지
     anomaly_paths = detect_anomaly.expand(csv_path=fetched_paths)
 
+    # S3 업로드
+    uploaded_paths = upload_to_s3.expand(file_path=anomaly_paths)
+
     # 분기 태스크 → fetch_only or run_pipeline
     branch = choose_branch()
     branch >> [fetch_only, run_pipeline]
-    anomaly_paths >> run_pipeline
+    uploaded_paths >> run_pipeline
 
 stock_anomaly_detection()
