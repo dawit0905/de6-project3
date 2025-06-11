@@ -45,17 +45,13 @@ def stock_news_match_pipeline():
         )
         df = pd.read_csv(io.BytesIO(response['Body'].read()))
         ticker = csv_key.split('/')[-1].split('_')[0]
-        anomalies = []
+        dates = df[df['is_outlier'] == True]['Date'].tolist()
 
-        if 'outlier' in df.columns:
-            filtered = df[df['outlier'] == True]
-            for _, row in filtered.iterrows():
-                anomalies.append({
-                    'ticker': ticker,
-                    'stock_name': stock_keyword.get(ticker, 'N/A'),
-                    'date': row['date']
-                })
-        return {'csv_key': csv_key, 'anomalies': anomalies}
+        return {
+            'ticker': ticker,
+            'stock_name': stock_keyword.get(ticker, 'N/A'),
+            'dates': dates
+        }
 
 
     @task
@@ -64,7 +60,6 @@ def stock_news_match_pipeline():
         keyword와 날짜(date)를 기준으로 뉴스 수집
         - date 기준 -3일 ~ 당일 범위로 설정 가능
         """
-        # anomay_item: {"ticker": ..., "stock_name": ..., "date": "0000-00-00"}
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -73,30 +68,32 @@ def stock_news_match_pipeline():
             'Connection': 'keep-alive',
             'Referer': 'https://www.google.com/'
         }
-        start_date = datetime.strptime(anomaly_item['date'], "%Y-%m-%d")
-        end_date = start_date + timedelta(days=1)
-        query = f"{anomaly_item['stock_name']}+after:{start_date:%Y-%m-%d}+before:{end_date:%Y-%m-%d}"
-        url = f"https://news.google.com/rss/search?q={query}"
-        feed = feedparser.parse(url, request_headers=headers)
-        return [{
-            'ticker': anomaly_item["ticker"],
-            'stock_name': anomaly_item["stock_name"] if anomaly_item["stock_name"] != "CJ%20ENM" else "CJ ENM",
-            'date': anomaly_item["date"],
-            'title': entry.title,
-            'link': entry.link,
-            'published': entry.get('published', ''),
-            'source': entry.get('source', {}).get('title', ''),
-        } for entry in feed.entries]
+        news = []
+        for date in anomaly_item["dates"]:
+            start_date = datetime.strptime(date, "%Y-%m-%d")
+            end_date = start_date + timedelta(days=1)
+            query = f"{anomaly_item['stock_name']}+after:{start_date:%Y-%m-%d}+before:{end_date:%Y-%m-%d}"
+            url = f"https://news.google.com/rss/search?q={query}"
+            feed = feedparser.parse(url, request_headers=headers)
+            news.extend([{
+                'ticker': anomaly_item["ticker"],
+                'stock_name': anomaly_item["stock_name"] if anomaly_item["stock_name"] != "CJ%20ENM" else "CJ ENM",
+                'date': date,
+                'title': entry.title,
+                'link': entry.link,
+                'published': entry.get('published', ''),
+                'source': entry.get('source', {}).get('title', ''),
+            } for entry in feed.entries])
+        return news
 
     @task
-    def upload_news(s3_object, news: list[list[dict]]) -> str:
+    def upload_news(s3_object, news: [list[dict]]) -> str:
         # s3으로 news를 csv 형태로 업로드하고 해당 s3 key를 리턴하는 함수
-        flattened = [item for sublist in news for item in sublist]
-        df = pd.DataFrame(flattened)
+        df = pd.DataFrame(news)
         csv_buffer = StringIO()
         df.to_csv(csv_buffer, index=False)
 
-        s3_key = f"news/{flattened['ticker']}_news.csv"
+        s3_key = f"news/{news[0]['ticker']}_news.csv"
         try:
             s3_object.upload_fileobj(
                 io.BytesIO(csv_buffer.getvalue().encode()),
@@ -123,7 +120,7 @@ def stock_news_match_pipeline():
         bucket_name=bucket_name
     ).expand(csv_key=csv_keys)
     fetched_news = fetch_news.expand(anomaly_item=anomalies)
-    news_upload_path = upload_news(s3_object=s3, news=fetched_news)
+    news_upload_path = upload_news.partial(s3_object=s3).expand(news=fetched_news)
 
     csv_keys >> anomalies >> fetched_news >> news_upload_path
 
