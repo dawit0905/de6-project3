@@ -108,14 +108,10 @@ def stock_news_match_pipeline():
             raise
         return s3_key  # 다음 DAG에서 사용할 키
 
-    aws_access_key_id = os.getenv('AWS_ACCESS_KEY_ID')
-    aws_secret_key = os.getenv('AWS_SECRET_ACCESS_KEY')
     bucket_name = S3_BUCKET
     prefix = S3_FOLDER
     s3 = boto3.client(
-        's3',
-        aws_access_key_id=aws_access_key_id,
-        aws_secret_access_key=aws_secret_key,
+        's3'
     )
 
     csv_keys = load_csv_files(
