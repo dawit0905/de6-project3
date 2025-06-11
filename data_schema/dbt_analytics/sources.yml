@@ -1,0 +1,10 @@
+version: 2
+
+sources:
+  - name: raw_data
+    database: project3_dev
+    schema: raw_data
+    tables:
+      - name: stock_outlier_raw
+      - name: news_raw
+      - name: news_keywords_raw

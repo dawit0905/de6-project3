@@ -1,0 +1,46 @@
+version: 2
+
+models:
+  - name: fact_stock_event
+    description: "주가 이상치 발생 정보를 담은 fact 테이블"
+    columns:
+      - name: event_id
+        description: "이벤트 ID (symbol + date surrogate key)"
+      - name: symbol
+      - name: date
+      - name: z_score
+      - name: direction
+      - name: close
+      - name: is_outlier
+
+  - name: dim_news
+    description: "이상치 이벤트와 연결된 뉴스 메타데이터"
+    columns:
+      - name: news_id
+        description: "뉴스 ID (md5(title))"
+      - name: event_id
+      - name: title
+      - name: published_at
+      - name: link
+
+  - name: dim_news_keyword
+    description: "TF-IDF 기반 키워드 정보"
+    columns:
+      - name: keyword_id
+        description: "키워드 ID (md5(symbol + date + keyword))"
+      - name: event_id
+      - name: keyword
+      - name: tfidf_score
+      - name: rank
+
+  - name: dim_date
+    description: "날짜 차원 테이블"
+    columns:
+      - name: date
+      - name: year
+      - name: month
+      - name: day
+      - name: weekday
+      - name: day_of_week
+      - name: is_weekend
+      - name: is_holiday
