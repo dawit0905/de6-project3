@@ -1,5 +1,17 @@
+import io
+import os
+import feedparser
+import pandas as pd
+import boto3
+from io import StringIO
+from datetime import timedelta
+
 from airflow.decorators import dag, task
 from airflow.utils.dates import datetime
+
+from common import stock_keyword
+from stock_utils import S3_FOLDER, S3_BUCKET
+
 
 @dag(
     dag_id='stock_news_match_pipeline',
@@ -12,23 +24,105 @@ from airflow.utils.dates import datetime
 def stock_news_match_pipeline():
 
     @task
-    def load_anomalies(ds: str) -> list:
-        """
-        TODO: DAG1에서 저장된 이상치 발생 정보 csv 파일을 읽어 anomaly 리스트 반환
-        리턴 예: [{'ticker': '005930.KS', 'date': '2024-05-21'}, ...]
-        """
-        return []
+    def load_csv_files(s3_object, bucket_name: str, prefix: str) -> list:
+        """S3 anomaly/ 폴더 내 모든 CSV 파일 경로 수집"""
+        paginator = s3_object.get_paginator('list_objects_v2')
+        csv_files = []
+
+        for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix):
+            for obj in page.get('Contents', []):
+                key = obj['Key']
+                if key.endswith('.csv') and not key.endswith('/'):
+                    csv_files.append(key)
+        return csv_files
 
     @task
-    def fetch_news(anomaly: dict):
+    def load_anomalies(s3_object, bucket_name: str, csv_key: str) -> dict:
+        # 파일 내용을 바이트로 읽어서 pandas로 처리
+        response = s3_object.get_object(
+            Bucket=bucket_name,
+            Key=csv_key
+        )
+        df = pd.read_csv(io.BytesIO(response['Body'].read()))
+        ticker = csv_key.split('/')[-1].split('_')[0]
+        dates = df[df['is_outlier'] == True]['Date'].tolist()
+
+        return {
+            'ticker': ticker,
+            'stock_name': stock_keyword.get(ticker, 'N/A'),
+            'dates': dates
+        }
+
+
+    @task
+    def fetch_news(anomaly_item: dict):
         """
-        TODO: ticker와 날짜(date)를 기준으로 뉴스 수집
+        keyword와 날짜(date)를 기준으로 뉴스 수집
         - date 기준 -3일 ~ 당일 범위로 설정 가능
         """
-        pass
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'ko-KR,ko;q=0.8,en-US;q=0.5,en;q=0.3',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+            'Referer': 'https://www.google.com/'
+        }
+        news = []
+        for date in anomaly_item["dates"]:
+            start_date = datetime.strptime(date, "%Y-%m-%d")
+            end_date = start_date + timedelta(days=1)
+            query = f"{anomaly_item['stock_name']}+after:{start_date:%Y-%m-%d}+before:{end_date:%Y-%m-%d}"
+            url = f"https://news.google.com/rss/search?q={query}"
+            feed = feedparser.parse(url, request_headers=headers)
+            news.extend([{
+                'ticker': anomaly_item["ticker"],
+                'stock_name': anomaly_item["stock_name"] if anomaly_item["stock_name"] != "CJ%20ENM" else "CJ ENM",
+                'date': date,
+                'title': entry.title,
+                'link': entry.link,
+                'published': entry.get('published', ''),
+                'source': entry.get('source', {}).get('title', ''),
+            } for entry in feed.entries])
+        return news
 
-    anomalies = load_anomalies()
-    fetch_news.expand(anomaly=anomalies)
+    @task
+    def upload_news(s3_object, news: [list[dict]]) -> str:
+        # s3으로 news를 csv 형태로 업로드하고 해당 s3 key를 리턴하는 함수
+        df = pd.DataFrame(news)
+        csv_buffer = StringIO()
+        df.to_csv(csv_buffer, index=False)
+
+        s3_key = f"news/{news[0]['ticker']}_news.csv"
+        try:
+            s3_object.upload_fileobj(
+                io.BytesIO(csv_buffer.getvalue().encode()),
+                bucket_name,
+                s3_key
+            )
+        except Exception as e:
+            print(str(e), f"{s3_key} data fail!")
+            raise
+        return s3_key  # 다음 DAG에서 사용할 키
+
+    bucket_name = S3_BUCKET
+    prefix = S3_FOLDER
+    s3 = boto3.client(
+        's3'
+    )
+
+    csv_keys = load_csv_files(
+        s3_object=s3,
+        bucket_name=bucket_name, prefix=prefix
+    )
+    anomalies = load_anomalies.partial(
+        s3_object=s3,
+        bucket_name=bucket_name
+    ).expand(csv_key=csv_keys)
+    fetched_news = fetch_news.expand(anomaly_item=anomalies)
+    news_upload_path = upload_news.partial(s3_object=s3).expand(news=fetched_news)
+
+    csv_keys >> anomalies >> fetched_news >> news_upload_path
 
 stock_news_match_pipeline()
 
